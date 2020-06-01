@@ -1,0 +1,218 @@
+Here are all the necessary steps to create our list of heterochromatic genes.
+
+* Our ChIP-Seq Het. Genes
+** Peak Calling
+** Peak annotation
+*** Create a "shifted" GFF
+#+begin_src python :tangle ./Scripts/shift_gff.py
+#!/usr/bin/env python
+
+# Import packages
+import pybedtools as py
+from pybedtools.featurefuncs import TSS
+from pybedtools.featurefuncs import three_prime
+import subprocess as sp
+
+# Parameters to set
+upstream = 500
+dwstream = 0
+ref = '/home/lucas/ISGlobal/Gen_Referencies/PlasmoDB-46_Pfalciparum3D7.gff'
+out_name = "/mnt/Disc4T/Projects/Llistat_CVG/Reference_GFF/anotation_PlasmoDB-46"
+
+# Create genome dict
+genome_file = "/home/lucas/ISGlobal/Gen_Referencies/Pf3D7.genome"
+
+genome={}
+with open(genome_file, "r+") as infile:
+    for line in infile:
+        genome[line.split()[0]] = (0, int(line.split()[1]))
+
+gff = py.BedTool(ref)
+sel = ["gene"]#, "rRNA", "snoRNA", "snRNA", "tRNA", "ncRNA"]
+
+gene_gff = gff.filter(lambda x: x.fields[2] in sel)
+
+fivePrime = gene_gff.each(TSS,
+                          upstream=upstream,
+                          downstream=1,
+                          add_to_name="_fivePrime",
+                          genome=genome).saveas(out_name+"_fivePrime.gff")
+
+gene_gff = gff.filter(lambda x: x.fields[2] in sel)
+
+threePrime = gene_gff.each(three_prime,
+                          upstream=1,
+                          downstream=dwstream,
+                           add_to_name="_threePrime",
+                           genome=genome).saveas(out_name+"_threePrime.gff")
+
+cmd = "cat {} {}_fivePrime.gff {}_threePrime.gff > {}.gff" .format(ref,
+                                                                   out_name,
+                                                                   out_name,
+                                                                   out_name)
+sp.call(cmd, shell = True)
+
+cmd = "gff_sorter.py {}.gff > {}_sorted.gff" .format(out_name, out_name)
+
+sp.call(cmd, shell = True)
+
+#+end_src
+*** Annotate Peaks File
+#+begin_src python :tangle ./Scripts/annotate_peaks.py
+import pybedtools as pb
+
+gff = "/mnt/Disc4T/Projects/Llistat_CVG/Reference_GFF/anotation_PlasmoDB-46_sorted.gff"
+bed = "/mnt/Disc4T/Projects/Cristina_ChIP_All/New_Coverage/New_Peaks/all_peaks.bed"
+
+ref = pb.BedTool(gff)
+bed = pb.BedTool(bed)
+#bed.count()
+
+anot = bed.intersect(ref, wao=True)
+#anot.count()
+
+anot = anot.filter(lambda x: x[5] == "gene")
+#anot.count()
+
+anot.saveas("all_peaks_annotated.bed")
+anot = pb.BedTool("all_peaks_annotated.bed")
+
+het_genes = set([x[11].split(";")[0].replace("ID=", "") for x in anot])
+het_genes_filtered = set(["_".join(g.split("_")[0:2]) for g in het_genes])
+
+with open("/mnt/Disc4T/Projects/Llistat_CVG/our_het_genes.txt", "w+") as outfile:
+    for gene in het_genes_filtered:
+        outfile.write(gene+"\n")
+#+end_src
+* Analysis of resulting Lists
+** Create a Venn Diagram of Overlaps
+#+begin_src R :session cvg_analysis :tangle ./Scripts/cvg_analysis.R
+library(readxl)
+library(VennDiagram)
+library(ggplot2)
+
+wd = "/mnt/Disc4T/Projects/Llistat_CVG/"
+setwd(wd)
+
+cvg <- read_xlsx("CVG_list_jan2020_acc.xlsx", sheet = "Final", na = "N/A")
+cvg <- cvg[,1:10]
+
+head(cvg)
+head(cvg[,4:7])
+
+s1 <- cvg[!is.na(cvg$Variantome),]$`Gene ID`
+s2 <- cvg[!is.na(cvg$Fraschka),]$`Gene ID`
+s3 <- cvg[!is.na(cvg$`Heterochromatic genes`),]$`Gene ID`
+s4 <- cvg[!is.na(cvg$`Our ChipSeq`),]$`Gene ID`
+
+s12 <- length(intersect(s1, s2))
+s13 <- length(intersect(s1, s3))
+s14 <- length(intersect(s1, s4))
+
+s23 <- length(intersect(s2, s3))
+s24 <- length(intersect(s2, s4))
+
+s34 <- length(intersect(s3, s4))
+
+s123 <- length(Reduce(intersect, list(s1, s2, s3)))
+s124 <- length(Reduce(intersect, list(s1, s2, s4)))
+s134 <- length(Reduce(intersect, list(s1, s3, s4)))
+s234 <- length(Reduce(intersect, list(s2, s3, s4)))
+
+s1234 <- length(Reduce(intersect, list(s1, s2, s3, s4)))
+
+v_plot <- draw.quad.venn(area1 = length(s1), area2 = length(s2),
+                         area3 = length(s3), area4 = length(s4),
+                         n12 = s12, n13 = s13, n14 = s14,
+                         n23 = s23, n24 = s24, n34 = s34,
+                         n123 = s123, n124 = s124, n134 = s134, n234 = s234,
+                         n1234 = s1234,
+                         category = c("Variantome",
+                                      "Fraschka",
+                                      "Het. Genes",
+                                      "Our ChIPs"),
+                         fill = c("#F57C00", "#536DFE", "#FFE0B2", "#757575"))
+
+ggsave(v_plot, "venn_diagram.tiff")
+#+end_src
+* Check final table
+#+begin_src python
+import pandas as pd
+
+table = "CVG_list_jan2020_final.xlsx"
+
+anot = pd.read_excel(table, sheet_name=0)
+variantome = pd.read_excel(table, sheet_name=1)
+
+fraschka = pd.read_excel(table, sheet_name=2, usecols=[0, 1, 2])
+
+# No treure
+fras_problematic = ["PF3D7_1039300", "PF3D7_1102000", "PF3D7_1220800"]
+
+
+chip_on_chip = pd.read_excel(table, sheet_name=3, usecols=[0, 1, 2, 3])
+
+# Treure
+ch_problematic = ["PF10_0383",
+                  "PF11_0033",
+                  "PF14_0740",
+                  "PF14_0741",
+                  "PFB0973c",
+                  "PFB0974c",
+                  "PFD0620c",
+                  "PFE1620c",
+                  "PFE1625c"]
+
+our_chip = pd.read_excel(table, sheet_name=4, usecols=[0, 1, 2])
+likely = pd.read_excel(table, sheet_name=5, usecols=[0, 1, 2, 7])
+
+
+fraschka["Table S1 + S4"]
+
+# Make Sets
+s_var = set(variantome["Gene ID"])
+s_fra = set(fraschka["Table S1 + S4"])
+s_chip = set(chip_on_chip["Gene ID"])
+s_our = set(our_chip["Gene ID"])
+s_likely = set(likely[likely["Likely Variant "] == "YES"]["Gene ID"])
+
+var_fra = s_var & s_fra
+var_chip = s_var & s_chip
+var_our = s_var & s_our
+fra_chip = s_fra & s_chip
+fra_our = s_fra & s_our
+chip_our = s_chip & s_our
+
+final_LC = set(pd.read_excel(table, sheet_name=6, skiprows=1, usecols=[0, 1, 2])["Gene ID"])
+final_Custom = set(pd.read_excel(table, sheet_name=6, skiprows=1, usecols=[3, 4, 5])["Gene ID.1"])
+final_HC = set(pd.read_excel(table, sheet_name=6, skiprows=1, usecols=[6, 7, 8])["Gene ID.2"])
+
+# Test LC
+test_LC = s_var | s_fra | s_chip | s_our
+failed_LC = (test_LC | final_LC) - (test_LC & final_LC)
+failed_LC
+
+# Test Custom
+test_Custom = s_our | s_likely | (var_fra | var_chip | fra_chip)
+failed_Custom = (test_Custom | final_Custom) - (test_Custom & final_Custom)
+failed_Custom
+
+#Test HC
+test_HC = var_fra | var_chip | var_our | fra_chip | fra_our | chip_our
+failed_HC = (test_HC | final_HC) - (test_HC & final_HC)
+failed_HC
+
+#Check our microarrays
+
+array = pd.read_excel(table, sheet_name=9)
+array.columns
+
+array_LC = array[array["Variant LC"] == "YES"]
+array_LC.equals(array[array["Gene ID"].isin(final_LC)])
+
+array_Custom = array[array["Variant Customized"] == "YES"]
+array_Custom.equals(array[array["Gene ID"].isin(final_Custom)])
+
+array_HC = array[array["Variant HC"] == "YES"]
+array_HC.equals(array[array["Gene ID"].isin(final_HC)])
+#+end_src
